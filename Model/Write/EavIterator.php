@@ -1,5 +1,7 @@
 <?php
 
+declare(strict_types=1);
+
 /**
  * Tweakwise (https://www.tweakwise.com/) - All Rights Reserved
  *
@@ -113,17 +115,19 @@ class EavIterator implements IteratorAggregate
      */
     private array $parentRelations = [];
 
+    private array $parentRelationsImageAttributes = [];
+
     /**
      * EavIterator constructor.
      *
-     * @param Helper $helper
-     * @param EavConfig $eavConfig
-     * @param DbContext $dbContext
-     * @param Manager $eventManager
-     * @param Config $config
-     * @param string $entityCode
-     * @param string[] $attributes
-     * @param int $batchSize
+     * @param Helper        $helper
+     * @param EavConfig     $eavConfig
+     * @param DbContext     $dbContext
+     * @param Manager       $eventManager
+     * @param Config        $config
+     * @param string        $entityCode
+     * @param string[]      $attributes
+     * @param int           $batchSize
      */
     public function __construct(
         Helper $helper,
@@ -244,9 +248,11 @@ class EavIterator implements IteratorAggregate
             }
         }
 
-        if ($entity['entity_id']) {
-            yield $entity;
+        if (!$entity['entity_id']) {
+            return;
         }
+
+        yield $entity;
     }
 
     /**
@@ -276,6 +282,7 @@ class EavIterator implements IteratorAggregate
                 $this->setEntityIds($entityIds);
                 if ($this->config->isGroupedExport($this->store) && $this->entityCode === Product::ENTITY) {
                     $this->preloadParentRelations($entityIds);
+                    $this->preloadConfigurableImageData();
                 }
 
                 $select = $this->createSelect();
@@ -303,6 +310,7 @@ class EavIterator implements IteratorAggregate
                             isset($this->parentRelations[$result['entity_id']])
                         ) {
                             $result['parent_id'] = $this->parentRelations[$result['entity_id']];
+                            $result = $this->setImagesAttributesFromConfigurable($result);
                         }
 
                         yield $result;
@@ -326,7 +334,7 @@ class EavIterator implements IteratorAggregate
         if (!isset($this->entitySet[$storeId])) {
             $select = $this->getConnection()->select();
             $select->from($this->getEntityType()->getEntityTable());
-            $select->reset('columns')->columns(['entity_id', 'created_at', 'updated_at', 'attribute_set_id']);
+            $select->reset('columns')->columns(['entity_id', 'created_at', 'updated_at']);
             $this->addEntityBatchOrder($select);
 
             if ($this->getEntityIds()) {
@@ -472,10 +480,10 @@ class EavIterator implements IteratorAggregate
             )
             ->columns(
                 [
-                'entity_id' => 'main_table.entity_id',
-                'store_id' => 'attribute_table.store_id',
-                'attribute_id' => 'attribute_table.attribute_id',
-                'value' => 'attribute_table.value'
+                    'entity_id' => 'main_table.entity_id',
+                    'store_id' => 'attribute_table.store_id',
+                    'attribute_id' => 'attribute_table.attribute_id',
+                    'value' => 'attribute_table.value'
                 ]
             )
             ->where('attribute_id IN (?)', array_keys($attributes));
@@ -575,5 +583,51 @@ class EavIterator implements IteratorAggregate
             ->where('cpe.type_id = ?', Configurable::TYPE_CODE);
 
         $this->parentRelations = $connection->fetchPairs($select);
+    }
+
+    /**
+     * @return void
+     */
+    protected function preloadConfigurableImageData(): void
+    {
+        $uniqueConfigurableIds = array_unique($this->parentRelations);
+        if (empty($uniqueConfigurableIds)) {
+            return;
+        }
+
+        $imageAttributes = ['image', 'small_image', 'thumbnail'];
+        $connection = $this->getConnection();
+        $select = $connection->select()
+            ->from(
+                ['cpev' => 'catalog_product_entity_varchar'],
+                ['entity_id' => 'cpev.entity_id', 'value' => 'cpev.value']
+            )
+            ->join(
+                ['ea' => 'eav_attribute'],
+                'ea.attribute_id = cpev.attribute_id',
+                ['attribute_code' => 'ea.attribute_code']
+            )
+            ->where('ea.attribute_code IN (?)', $imageAttributes)
+            ->where('cpev.entity_id IN (?)', $uniqueConfigurableIds);
+
+        $result = $connection->fetchAll($select);
+        foreach ($result as $row) {
+            $this->parentRelationsImageAttributes[$row['entity_id']][$row['attribute_code']] = $row['value'];
+        }
+    }
+
+    /**
+     * @param array $attributes
+     *
+     * @return array
+     */
+    protected function setImagesAttributesFromConfigurable(array $attributes): array
+    {
+        $parentId = $attributes['parent_id'];
+        foreach ($this->parentRelationsImageAttributes[$parentId] ?? [] as $attribute => $attributeValue) {
+            $attributes[$attribute] = $attributeValue;
+        }
+
+        return $attributes;
     }
 }
